@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="subenum — Subdomain enumeration tool with DNS brute-force and Certificate Transparency log queries" />
+  <title>subenum — Subdomain Enumerator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── Animated background ──────────────────────────────────────────── -->
+  <canvas id="bg-canvas"></canvas>
+
+  <!-- ── Header ──────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-bracket">[</span>
+        <span class="logo-text">sub</span><span class="logo-accent">enum</span>
+        <span class="logo-bracket">]</span>
+        <span class="logo-tag">v1.0</span>
+      </div>
+      <div class="header-meta">
+        <span class="pill pill-green" id="server-status">● ONLINE</span>
+        <span class="pill pill-dim">DNS + CT Logs</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main layout ─────────────────────────────────────────────────── -->
+  <main class="layout">
+
+    <!-- LEFT: Config panel -->
+    <section class="panel panel-config" aria-label="Scan configuration">
+      <h2 class="panel-title"><span class="icon">⚙</span> Configuration</h2>
+
+      <form id="scan-form" autocomplete="off" novalidate>
+
+        <div class="field-group">
+          <label for="domain" class="field-label">Target Domain <span class="required">*</span></label>
+          <div class="input-wrap">
+            <span class="input-icon">◈</span>
+            <input
+              type="text"
+              id="domain"
+              name="domain"
+              class="field-input"
+              placeholder="example.com"
+              spellcheck="false"
+              required
+            />
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label for="threads" class="field-label">Concurrency (threads)</label>
+          <div class="input-wrap">
+            <span class="input-icon">⚡</span>
+            <input type="number" id="threads" name="threads" class="field-input" value="50" min="1" max="500" />
+          </div>
+          <span class="field-hint">Concurrent DNS lookups (1–500)</span>
+        </div>
+
+        <div class="field-group">
+          <label for="timeout" class="field-label">DNS Timeout (ms)</label>
+          <div class="input-wrap">
+            <span class="input-icon">⏱</span>
+            <input type="number" id="timeout" name="timeout" class="field-input" value="2000" min="500" max="10000" />
+          </div>
+          <span class="field-hint">Per-lookup timeout in milliseconds</span>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label">Options</label>
+          <div class="toggle-group">
+            <label class="toggle" for="skip-crt">
+              <input type="checkbox" id="skip-crt" name="skipCrt" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-text">Skip crt.sh lookup</span>
+            </label>
+            <label class="toggle" for="verbose">
+              <input type="checkbox" id="verbose" name="verbose" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-text">Verbose (show failed)</span>
+            </label>
+          </div>
+        </div>
+
+        <button type="submit" class="btn-scan" id="btn-scan">
+          <span class="btn-scan-inner">
+            <span class="btn-icon">▶</span>
+            <span class="btn-label">Launch Scan</span>
+          </span>
+          <span class="btn-glow"></span>
+        </button>
+
+        <button type="button" class="btn-stop hidden" id="btn-stop">
+          ■ Stop
+        </button>
+
+      </form>
+
+      <!-- Progress -->
+      <div class="progress-wrap hidden" id="progress-wrap">
+        <div class="progress-label">
+          <span id="progress-status">Initialising…</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-bar"></div>
+        </div>
+      </div>
+
+      <!-- Export -->
+      <div class="export-wrap hidden" id="export-wrap">
+        <button class="btn-export" id="btn-export">
+          ↓ Download JSON Report
+        </button>
+      </div>
+
+    </section>
+
+    <!-- RIGHT: Results pane -->
+    <section class="panel panel-results" aria-label="Scan results">
+
+      <!-- Stats row -->
+      <div class="stats-row">
+        <div class="stat-card" id="stat-total">
+          <div class="stat-value" id="val-total">—</div>
+          <div class="stat-label">Total</div>
+        </div>
+        <div class="stat-card stat-live" id="stat-live">
+          <div class="stat-value" id="val-live">—</div>
+          <div class="stat-label">Live</div>
+        </div>
+        <div class="stat-card stat-cname" id="stat-cname">
+          <div class="stat-value" id="val-cname">—</div>
+          <div class="stat-label">CNAME</div>
+        </div>
+        <div class="stat-card stat-crt" id="stat-crt">
+          <div class="stat-value" id="val-crt">—</div>
+          <div class="stat-label">CT Logs</div>
+        </div>
+        <div class="stat-card stat-fail" id="stat-fail">
+          <div class="stat-value" id="val-fail">—</div>
+          <div class="stat-label">Failed</div>
+        </div>
+      </div>
+
+      <!-- Terminal -->
+      <div class="terminal" id="terminal" role="log" aria-live="polite">
+        <div class="terminal-toolbar">
+          <span class="tb-dot tb-red"></span>
+          <span class="tb-dot tb-yellow"></span>
+          <span class="tb-dot tb-green"></span>
+          <span class="tb-title">subenum — terminal output</span>
+          <button class="tb-clear" id="btn-clear" title="Clear terminal">⌫ clear</button>
+        </div>
+        <div class="terminal-body" id="terminal-body">
+          <div class="terminal-welcome">
+            <pre class="ascii-art">
+  ___  _   _ ____  _____ _   _ _   _ __  __
+ / __|| | | | __ )| ____| \ | | | | |  \/  |
+ \__ \| | | |  _ \|  _| |  \| | | | | |\/| |
+  ___) | |_| | |_) | |___| |\  | |_| | |  | |
+ |____/ \___/|____/|_____|_| \_|\___/|_|  |_|</pre>
+            <p class="welcome-msg">Enter a domain and click <strong>Launch Scan</strong> to begin.</p>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ── Results table (shown after scan) ─────────────────────────────── -->
+  <section class="results-section hidden" id="results-section">
+    <div class="results-header">
+      <h2 class="panel-title"><span class="icon">◈</span> Resolved Subdomains</h2>
+      <div class="filter-tabs" id="filter-tabs">
+        <button class="tab active" data-filter="all">All</button>
+        <button class="tab" data-filter="A">A Records</button>
+        <button class="tab" data-filter="CNAME">CNAME</button>
+        <button class="tab" data-filter="bruteforce">Bruteforce</button>
+        <button class="tab" data-filter="crt.sh">crt.sh</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="results-table" id="results-table">
+        <thead>
+          <tr>
+            <th>Subdomain</th>
+            <th>Addresses</th>
+            <th>Type</th>
+            <th>Source</th>
+            <th>Timestamp</th>
+          </tr>
+        </thead>
+        <tbody id="results-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <span>subenum v1.0 — Node.js 18+ · dns.promises · crt.sh</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
