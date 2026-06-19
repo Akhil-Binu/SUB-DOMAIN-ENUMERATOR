@@ -1,5 +1,33 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "public/**",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "api/scan.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/results/[domain].js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/scan",
+      "dest": "/api/scan.js"
+    },
+    {
+      "src": "/api/results/(.*)",
+      "dest": "/api/results/[domain].js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/public/$1"
+    }
+  ],
   "functions": {
     "api/scan.js": {
       "maxDuration": 300
@@ -7,9 +35,5 @@
     "api/results/[domain].js": {
       "maxDuration": 10
     }
-  },
-  "rewrites": [
-    { "source": "/api/scan", "destination": "/api/scan" },
-    { "source": "/api/results/:domain", "destination": "/api/results/[domain]" }
-  ]
+  }
 }

@@ -1,0 +1,4 @@
+# Exclude local-only files from Vercel deployment
+server.js
+output/
+wordlists/generate-wordlist.js
