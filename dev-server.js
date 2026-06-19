@@ -19,6 +19,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PORT = 3000;
 
+// On Vercel /var/task is read-only — write to /tmp instead
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
+const OUTPUT_DIR = IS_VERCEL
+  ? '/tmp/subenum-output'
+  : path.join(__dirname, 'output');
+
+
 // ─── MIME types ───────────────────────────────────────────────────────────────
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -166,7 +173,7 @@ async function runScan(scanId, opts) {
     }
 
     // ── Save report ──────────────────────────────────────────────────────────
-    const outputPath = await saveReport(scan.results, domain, path.join(__dirname, 'output'));
+    const outputPath = await saveReport(scan.results, domain, OUTPUT_DIR);
     const live = scan.results.filter((r) => r.type !== 'none').length;
 
     scan.meta = {
@@ -270,7 +277,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      const outputPath = await saveReport(allResults, domain, path.join(__dirname, 'output'));
+      const outputPath = await saveReport(allResults, domain, OUTPUT_DIR);
       const live        = allResults.filter((r) => r.type !== 'none').length;
       send('done', {
         domain, total: allResults.length, live,
@@ -356,7 +363,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && pathname.startsWith('/api/results/')) {
     const domain = pathname.split('/')[3];
     try {
-      const file = path.join(__dirname, 'output', `${domain}_results.json`);
+      const file = path.join(OUTPUT_DIR, `${domain}_results.json`);
       const content = await readFile(file, 'utf8');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(content);
@@ -371,7 +378,8 @@ const server = http.createServer(async (req, res) => {
   await serveStatic(res, filePath);
 });
 
-await mkdir(path.join(__dirname, 'output'), { recursive: true });
+await mkdir(OUTPUT_DIR, { recursive: true });
+
 
 server.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════╗`);

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "gui": "node server.js",
+    "gui": "node dev-server.js",
     "lint": "node --check src/index.js src/resolver.js src/crtsh.js src/reporter.js"
   },
   "dependencies": {
