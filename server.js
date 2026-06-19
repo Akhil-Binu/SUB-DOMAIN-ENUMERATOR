@@ -210,6 +210,83 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  // ── GET /api/scan — SSE stream (Vercel-compatible stateless endpoint) ────────
+  if (req.method === 'GET' && pathname === '/api/scan') {
+    const domain  = urlObj.searchParams.get('domain')?.trim().toLowerCase();
+    const threads = parseInt(urlObj.searchParams.get('threads') ?? '50',   10);
+    const timeout = parseInt(urlObj.searchParams.get('timeout') ?? '2000', 10);
+    const skipCrt = urlObj.searchParams.get('skipCrt') === 'true';
+    const verbose = urlObj.searchParams.get('verbose') === 'true';
+
+    if (!domain) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'domain query parameter is required' }));
+    }
+
+    res.writeHead(200, {
+      'Content-Type':      'text/event-stream',
+      'Cache-Control':     'no-cache',
+      'Connection':        'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders?.();
+    res.write(': connected\n\n');
+
+    const send = (event, data) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+
+    const wordlistPath = path.join(__dirname, 'wordlists', 'subdomains.txt');
+    const allResults   = [];
+
+    try {
+      let crtHosts = [];
+      if (!skipCrt) {
+        send('status', { msg: 'Querying crt.sh certificate logs…' });
+        try {
+          crtHosts = await fetchCrtSh(domain);
+          send('crt', { count: crtHosts.length });
+        } catch (e) {
+          send('error', { msg: `crt.sh failed: ${e.message}` });
+        }
+      }
+
+      send('status', { msg: 'Starting DNS brute-force…' });
+      const bruteResults = await resolveSubdomains({
+        domain, wordlistPath, concurrency: threads, timeoutMs: timeout,
+        verbose, source: 'bruteforce',
+        onResult: (r) => { allResults.push(r); if (r.type !== 'none' || verbose) send('result', r); },
+      });
+
+      const resolvedNames = new Set(bruteResults.map((r) => r.subdomain));
+      const crtOnly = crtHosts.filter((c) => !resolvedNames.has(c) && c.endsWith(`.${domain}`));
+
+      if (crtOnly.length > 0) {
+        send('status', { msg: `Resolving ${crtOnly.length} CT log subdomains…` });
+        await resolveSubdomains({
+          domain, candidates: crtOnly, concurrency: threads, timeoutMs: timeout,
+          verbose, source: 'crt.sh',
+          onResult: (r) => { allResults.push(r); if (r.type !== 'none' || verbose) send('result', r); },
+        });
+      }
+
+      const outputPath = await saveReport(allResults, domain, path.join(__dirname, 'output'));
+      const live        = allResults.filter((r) => r.type !== 'none').length;
+      send('done', {
+        domain, total: allResults.length, live,
+        aRecords:    allResults.filter((r) => r.type === 'A').length,
+        cnameRecords: allResults.filter((r) => r.type === 'CNAME').length,
+        unresolvable: allResults.filter((r) => r.type === 'none').length,
+        outputPath,
+      });
+    } catch (err) {
+      send('error', { msg: err.message });
+    } finally {
+      res.end();
+    }
+    return;
+  }
+
   // ── POST /api/scan — start a scan ─────────────────────────────────────────
   if (req.method === 'POST' && pathname === '/api/scan') {
     try {

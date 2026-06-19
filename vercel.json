@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "functions": {
+    "api/scan.js": {
+      "maxDuration": 300
+    },
+    "api/results/[domain].js": {
+      "maxDuration": 10
+    }
+  },
+  "rewrites": [
+    { "source": "/api/scan", "destination": "/api/scan" },
+    { "source": "/api/results/:domain", "destination": "/api/results/[domain]" }
+  ]
+}

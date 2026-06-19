@@ -1,0 +1,173 @@
+/**
+ * @file api/scan.js
+ * @description Vercel serverless function — GET /api/scan
+ *
+ * Streams scan results as Server-Sent Events (SSE) directly in a single
+ * stateless GET request. Compatible with Vercel's serverless runtime.
+ *
+ * Query params:
+ *   domain    {string}  Target domain (required)
+ *   threads   {number}  Concurrency (default: 50)
+ *   timeout   {number}  DNS timeout ms (default: 2000)
+ *   skipCrt   {string}  "true" to skip crt.sh
+ *   verbose   {string}  "true" to include unresolvable results
+ */
+
+import { resolveSubdomains } from '../src/resolver.js';
+import { fetchCrtSh } from '../src/crtsh.js';
+import { saveReport } from '../src/reporter.js';
+import path from 'path';
+import { mkdir } from 'fs/promises';
+
+// Vercel allows writes to /tmp at runtime
+const TMP_OUTPUT = '/tmp/subenum-output';
+
+/**
+ * Write an SSE event to the response.
+ * @param {import('http').ServerResponse} res
+ * @param {string} event  SSE event name
+ * @param {object} data   JSON payload
+ */
+function sendEvent(res, event, data) {
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  } catch {
+    // client disconnected
+  }
+}
+
+/**
+ * Vercel serverless handler — streams SSE scan results.
+ * @param {import('http').IncomingMessage} req
+ * @param {import('http').ServerResponse}  res
+ */
+export default async function handler(req, res) {
+  // ── Only allow GET ──────────────────────────────────────────────────────────
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method not allowed. Use GET.' });
+    return;
+  }
+
+  // ── Parse query params ──────────────────────────────────────────────────────
+  const url      = new URL(req.url, `https://${req.headers.host}`);
+  const domain   = url.searchParams.get('domain')?.trim().toLowerCase();
+  const threads  = parseInt(url.searchParams.get('threads')  ?? '50',   10);
+  const timeout  = parseInt(url.searchParams.get('timeout')  ?? '2000', 10);
+  const skipCrt  = url.searchParams.get('skipCrt')  === 'true';
+  const verbose  = url.searchParams.get('verbose')  === 'true';
+
+  if (!domain) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'domain query parameter is required' }));
+    return;
+  }
+
+  // ── Open SSE stream ─────────────────────────────────────────────────────────
+  res.writeHead(200, {
+    'Content-Type':  'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection':    'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.flushHeaders?.();
+  res.write(': connected\n\n');
+
+  /** @type {Array<import('../src/resolver.js').SubdomainResult>} */
+  const allResults = [];
+
+  try {
+    // ── 1. crt.sh lookup ──────────────────────────────────────────────────────
+    let crtHosts = [];
+    if (!skipCrt) {
+      sendEvent(res, 'status', { msg: 'Querying crt.sh certificate logs…' });
+      try {
+        crtHosts = await fetchCrtSh(domain);
+        sendEvent(res, 'crt', { count: crtHosts.length });
+      } catch (e) {
+        sendEvent(res, 'error', { msg: `crt.sh failed: ${e.message}` });
+      }
+    }
+
+    // ── 2. Brute-force (use a built-in mini wordlist on Vercel since the
+    //       wordlists/ directory IS deployed — resolve path relative to this file)
+    sendEvent(res, 'status', { msg: 'Starting DNS brute-force…' });
+
+    const wordlistPath = path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      '..',
+      'wordlists',
+      'subdomains.txt'
+    );
+
+    const bruteResults = await resolveSubdomains({
+      domain,
+      wordlistPath,
+      concurrency: Math.min(threads, 100), // cap at 100 for serverless safety
+      timeoutMs:   timeout,
+      verbose,
+      source: 'bruteforce',
+      onResult: (result) => {
+        allResults.push(result);
+        if (result.type !== 'none' || verbose) {
+          sendEvent(res, 'result', result);
+        }
+      },
+    });
+
+    // ── 3. Resolve crt.sh-only candidates ─────────────────────────────────────
+    const resolvedNames = new Set(bruteResults.map((r) => r.subdomain));
+    const crtOnly = crtHosts.filter(
+      (c) => !resolvedNames.has(c) && c.endsWith(`.${domain}`)
+    );
+
+    if (crtOnly.length > 0) {
+      sendEvent(res, 'status', { msg: `Resolving ${crtOnly.length} CT log subdomains…` });
+      await resolveSubdomains({
+        domain,
+        candidates: crtOnly,
+        concurrency: Math.min(threads, 100),
+        timeoutMs:   timeout,
+        verbose,
+        source: 'crt.sh',
+        onResult: (result) => {
+          allResults.push(result);
+          if (result.type !== 'none' || verbose) {
+            sendEvent(res, 'result', result);
+          }
+        },
+      });
+    }
+
+    // ── 4. Save report to /tmp ─────────────────────────────────────────────────
+    let outputPath = null;
+    try {
+      await mkdir(TMP_OUTPUT, { recursive: true });
+      outputPath = await saveReport(allResults, domain, TMP_OUTPUT);
+    } catch (e) {
+      // Non-fatal — report the issue but continue
+      sendEvent(res, 'error', { msg: `Report save failed: ${e.message}` });
+    }
+
+    // ── 5. Done event ──────────────────────────────────────────────────────────
+    const live        = allResults.filter((r) => r.type !== 'none').length;
+    const aRecords    = allResults.filter((r) => r.type === 'A').length;
+    const cnameRec    = allResults.filter((r) => r.type === 'CNAME').length;
+    const unresolvable = allResults.filter((r) => r.type === 'none').length;
+
+    sendEvent(res, 'done', {
+      domain,
+      total: allResults.length,
+      live,
+      aRecords,
+      cnameRecords: cnameRec,
+      unresolvable,
+      outputPath,
+    });
+
+  } catch (err) {
+    sendEvent(res, 'error', { msg: `Fatal scan error: ${err.message}` });
+  } finally {
+    res.end();
+  }
+}

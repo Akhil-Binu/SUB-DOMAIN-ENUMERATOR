@@ -1,8 +1,9 @@
 /**
  * @file app.js
  * @description Frontend logic for the subenum GUI.
- *              Handles form submission, SSE streaming, live terminal output,
- *              animated stats counters, result table filtering, and JSON export.
+ *              Compatible with both local server.js and Vercel serverless.
+ *              Uses GET-based SSE endpoint (/api/scan?domain=...) — stateless,
+ *              no scanId handshake required.
  */
 
 'use strict';
@@ -12,38 +13,28 @@
 (function initCanvas() {
   const canvas = document.getElementById('bg-canvas');
   const ctx = canvas.getContext('2d');
-  let W, H, cols, rows;
-
+  let W, H;
   const CELL = 36;
   const COLOR = 'rgba(0, 212, 255, 0.07)';
 
   function resize() {
     W = canvas.width  = window.innerWidth;
     H = canvas.height = window.innerHeight;
-    cols = Math.ceil(W / CELL);
-    rows = Math.ceil(H / CELL);
   }
 
   function draw() {
     ctx.clearRect(0, 0, W, H);
     ctx.strokeStyle = COLOR;
     ctx.lineWidth = 0.5;
-
+    const cols = Math.ceil(W / CELL);
+    const rows = Math.ceil(H / CELL);
     for (let x = 0; x <= cols; x++) {
-      ctx.beginPath();
-      ctx.moveTo(x * CELL, 0);
-      ctx.lineTo(x * CELL, H);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x * CELL, 0); ctx.lineTo(x * CELL, H); ctx.stroke();
     }
     for (let y = 0; y <= rows; y++) {
-      ctx.beginPath();
-      ctx.moveTo(0, y * CELL);
-      ctx.lineTo(W, y * CELL);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y * CELL); ctx.lineTo(W, y * CELL); ctx.stroke();
     }
-
-    // Draw a subtle radial vignette fade
-    const grad = ctx.createRadialGradient(W / 2, H / 2, H * 0.2, W / 2, H / 2, H * 0.85);
+    const grad = ctx.createRadialGradient(W/2, H/2, H*0.2, W/2, H/2, H*0.85);
     grad.addColorStop(0, 'rgba(8,12,18,0)');
     grad.addColorStop(1, 'rgba(8,12,18,0.9)');
     ctx.fillStyle = grad;
@@ -57,16 +48,16 @@
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
 
-const form       = document.getElementById('scan-form');
-const btnScan    = document.getElementById('btn-scan');
-const btnStop    = document.getElementById('btn-stop');
-const btnClear   = document.getElementById('btn-clear');
-const btnExport  = document.getElementById('btn-export');
-const termBody   = document.getElementById('terminal-body');
-const progressWrap = document.getElementById('progress-wrap');
-const progressBar  = document.getElementById('progress-bar');
+const form           = document.getElementById('scan-form');
+const btnScan        = document.getElementById('btn-scan');
+const btnStop        = document.getElementById('btn-stop');
+const btnClear       = document.getElementById('btn-clear');
+const btnExport      = document.getElementById('btn-export');
+const termBody       = document.getElementById('terminal-body');
+const progressWrap   = document.getElementById('progress-wrap');
+const progressBar    = document.getElementById('progress-bar');
 const progressStatus = document.getElementById('progress-status');
-const exportWrap = document.getElementById('export-wrap');
+const exportWrap     = document.getElementById('export-wrap');
 const resultsSection = document.getElementById('results-section');
 const resultsTbody   = document.getElementById('results-tbody');
 const filterTabs     = document.getElementById('filter-tabs');
@@ -79,30 +70,37 @@ const valFail  = document.getElementById('val-fail');
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let evtSource = null;  // current EventSource
+let evtSource     = null;
 let currentDomain = '';
-let allResults = [];   // all SubdomainResult objects received
-let stats = { total: 0, live: 0, cname: 0, crt: 0, fail: 0 };
+let allResults    = [];
+let stats         = { total: 0, live: 0, cname: 0, crt: 0, fail: 0 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/** HTML-escape to prevent XSS. */
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** Pad string to fixed column width. */
+function padEnd(str, width) {
+  return str.length >= width ? str : str + ' '.repeat(width - str.length);
+}
+
 /**
  * Append a colored line to the terminal.
- * @param {string} cls   CSS class: 'live' | 'cname' | 'failed' | 'info' | 'done' | 'err'
- * @param {string} tag   Left label e.g. '[+]'
- * @param {string} host  Subdomain name
- * @param {string} [addr] Address / extra info
- * @param {string} [type] Record type annotation
+ * @param {'live'|'cname'|'failed'|'info'|'done'|'err'} cls
  */
 function termLine(cls, tag, host, addr = '', type = '') {
-  // Remove welcome screen on first real line
   const welcome = termBody.querySelector('.terminal-welcome');
   if (welcome) welcome.remove();
 
   const div = document.createElement('div');
   div.className = `t-line ${cls}`;
   div.innerHTML =
-    `<span class="t-tag">${tag}</span>` +
+    `<span class="t-tag">${escHtml(tag)}</span>` +
     `<span class="t-host">${escHtml(host)}</span>` +
     (addr ? `<span class="t-addr"> → ${escHtml(addr)}</span>` : '') +
     (type ? `<span class="t-type"> (${escHtml(type)})</span>` : '');
@@ -111,32 +109,18 @@ function termLine(cls, tag, host, addr = '', type = '') {
   termBody.scrollTop = termBody.scrollHeight;
 }
 
-/** HTML-escape a string to prevent XSS from domain/host values. */
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/**
- * Animate a stat counter to a new value.
- * @param {HTMLElement} el
- * @param {number} target
- */
+/** Animate a stat counter. */
 function animateStat(el, target) {
-  const current = parseInt(el.textContent, 10) || 0;
-  if (current === target) return;
   el.textContent = String(target);
-  el.closest('.stat-card')?.classList.remove('bump');
-  void el.closest('.stat-card')?.offsetWidth; // reflow
-  el.closest('.stat-card')?.classList.add('bump');
+  const card = el.closest('.stat-card');
+  if (card) {
+    card.classList.remove('bump');
+    void card.offsetWidth;
+    card.classList.add('bump');
+  }
 }
 
-/**
- * Update all stat counters.
- */
+/** Update all stat counters. */
 function updateStats() {
   animateStat(valTotal, stats.total);
   animateStat(valLive,  stats.live);
@@ -145,10 +129,7 @@ function updateStats() {
   animateStat(valFail,  stats.fail);
 }
 
-/**
- * Add a row to the results table.
- * @param {object} result  SubdomainResult
- */
+/** Add a row to the results table. */
 function addTableRow(result) {
   const { subdomain, addresses, type, source, timestamp } = result;
   const tr = document.createElement('tr');
@@ -156,11 +137,11 @@ function addTableRow(result) {
   tr.dataset.source = source;
 
   const addrDisplay = addresses.length > 0
-    ? addresses.join(', ')
+    ? escHtml(addresses.join(', '))
     : '<span style="color:var(--text-dim)">—</span>';
 
-  const typeBadge   = type !== 'none'
-    ? `<span class="badge badge-${type}">${type}</span>`
+  const typeBadge = type !== 'none'
+    ? `<span class="badge badge-${escHtml(type)}">${escHtml(type)}</span>`
     : '<span style="color:var(--text-dim)">none</span>';
 
   const sourceBadge = source === 'crt.sh'
@@ -174,16 +155,15 @@ function addTableRow(result) {
     `<td>${addrDisplay}</td>` +
     `<td>${typeBadge}</td>` +
     `<td>${sourceBadge}</td>` +
-    `<td style="color:var(--text-dim)">${ts}</td>`;
+    `<td style="color:var(--text-dim)">${escHtml(ts)}</td>`;
 
   resultsTbody.appendChild(tr);
 }
 
-/** Indeterminate progress pulse. */
+/** Show indeterminate progress bar. */
 function pulseProgress(msg) {
   progressWrap.classList.remove('hidden');
   progressStatus.textContent = msg ?? 'Working…';
-  // Animate bar back and forth (indeterminate)
   progressBar.style.width = '60%';
 }
 
@@ -193,7 +173,7 @@ function hideProgress() {
   setTimeout(() => progressWrap.classList.add('hidden'), 600);
 }
 
-/** Set the UI into scanning state. */
+/** Toggle scanning UI state. */
 function setScanningState(on) {
   if (on) {
     btnScan.classList.add('scanning');
@@ -207,7 +187,7 @@ function setScanningState(on) {
   }
 }
 
-/** Stop the current SSE stream. */
+/** Stop the active SSE stream. */
 function stopScan() {
   if (evtSource) {
     evtSource.close();
@@ -224,10 +204,8 @@ function stopScan() {
 filterTabs.addEventListener('click', (e) => {
   const tab = e.target.closest('.tab');
   if (!tab) return;
-
   filterTabs.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
   tab.classList.add('active');
-
   const filter = tab.dataset.filter;
   resultsTbody.querySelectorAll('tr').forEach((tr) => {
     if (filter === 'all') {
@@ -250,82 +228,74 @@ btnClear.addEventListener('click', () => {
 
 btnStop.addEventListener('click', stopScan);
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ─── Export (client-side JSON bundle — works on Vercel) ───────────────────────
 
 btnExport.addEventListener('click', () => {
-  if (!currentDomain) return;
+  if (!currentDomain || allResults.length === 0) return;
 
-  fetch(`/api/results/${encodeURIComponent(currentDomain)}`)
-    .then((r) => r.json())
-    .then((data) => {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = `${currentDomain}_results.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    })
-    .catch(() => termLine('err', '[!]', 'Failed to fetch report from server.'));
+  const liveResults = allResults.filter((r) => r.type !== 'none');
+
+  const report = {
+    meta: {
+      domain:          currentDomain,
+      generatedAt:     new Date().toISOString(),
+      totalCandidates: allResults.length,
+      liveCount:       liveResults.length,
+      aRecords:        allResults.filter((r) => r.type === 'A').length,
+      cnameRecords:    allResults.filter((r) => r.type === 'CNAME').length,
+      unresolvable:    allResults.filter((r) => r.type === 'none').length,
+    },
+    results: allResults,
+  };
+
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `${currentDomain}_results.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 });
 
 // ─── Form submit ──────────────────────────────────────────────────────────────
 
-form.addEventListener('submit', async (e) => {
+form.addEventListener('submit', (e) => {
   e.preventDefault();
 
   const domain = document.getElementById('domain').value.trim().toLowerCase();
-  if (!domain) {
-    document.getElementById('domain').focus();
-    return;
-  }
+  if (!domain) { document.getElementById('domain').focus(); return; }
 
-  // Stop any running scan
+  // Kill any running scan
   if (evtSource) stopScan();
 
   // Reset state
-  currentDomain = domain;
-  allResults    = [];
-  stats         = { total: 0, live: 0, cname: 0, crt: 0, fail: 0 };
-  updateStats();
-  termBody.innerHTML = '';
+  currentDomain          = domain;
+  allResults             = [];
+  stats                  = { total: 0, live: 0, cname: 0, crt: 0, fail: 0 };
+  termBody.innerHTML     = '';
   resultsTbody.innerHTML = '';
   resultsSection.classList.add('hidden');
   exportWrap.classList.add('hidden');
+  updateStats();
 
   setScanningState(true);
-  pulseProgress('Starting scan…');
+  pulseProgress('Connecting…');
 
-  termLine('info', '[◈]', `Target: ${domain}`);
-  termLine('info', '[◈]', `Threads: ${document.getElementById('threads').value}  Timeout: ${document.getElementById('timeout').value}ms`);
+  termLine('info', '[◈]', `Target  : ${domain}`);
+  termLine('info', '[◈]', `Threads : ${document.getElementById('threads').value}   Timeout : ${document.getElementById('timeout').value}ms`);
 
-  // ── Start scan via API ──────────────────────────────────────────────────
-  let scanId;
-  try {
-    const res = await fetch('/api/scan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        domain,
-        threads:  parseInt(document.getElementById('threads').value,  10),
-        timeout:  parseInt(document.getElementById('timeout').value,  10),
-        skipCrt:  document.getElementById('skip-crt').checked,
-        verbose:  document.getElementById('verbose').checked,
-      }),
-    });
+  // ── Build query string and open SSE (stateless GET — works on Vercel) ───────
+  const params = new URLSearchParams({
+    domain,
+    threads: document.getElementById('threads').value,
+    timeout: document.getElementById('timeout').value,
+    skipCrt: document.getElementById('skip-crt').checked ? 'true' : 'false',
+    verbose: document.getElementById('verbose').checked  ? 'true' : 'false',
+  });
 
-    const json = await res.json();
-    if (!res.ok || !json.scanId) throw new Error(json.error || 'Server error');
-    scanId = json.scanId;
-  } catch (err) {
-    termLine('err', '[!]', `Failed to start scan: ${err.message}`);
-    setScanningState(false);
-    hideProgress();
-    return;
-  }
-
-  // ── Subscribe to SSE stream ─────────────────────────────────────────────
-  evtSource = new EventSource(`/api/stream/${scanId}`);
+  evtSource = new EventSource(`/api/scan?${params}`);
 
   evtSource.addEventListener('status', (e) => {
     const { msg } = JSON.parse(e.data);
@@ -336,7 +306,7 @@ form.addEventListener('submit', async (e) => {
   evtSource.addEventListener('crt', (e) => {
     const { count } = JSON.parse(e.data);
     stats.crt = count;
-    valCrt.textContent = count;
+    animateStat(valCrt, count);
     termLine('info', '[crt]', `Found ${count} subdomains from certificate logs`);
   });
 
@@ -347,12 +317,10 @@ form.addEventListener('submit', async (e) => {
 
     if (result.type === 'A') {
       stats.live++;
-      const addr = result.addresses[0] ?? '';
-      termLine('live', '[+]', result.subdomain, addr, 'A');
+      termLine('live',   '[+]', result.subdomain, result.addresses[0] ?? '', 'A');
     } else if (result.type === 'CNAME') {
       stats.cname++;
-      const cname = result.addresses[0] ?? '';
-      termLine('cname', '[+]', result.subdomain, cname, 'CNAME');
+      termLine('cname',  '[+]', result.subdomain, result.addresses[0] ?? '', 'CNAME');
     } else {
       stats.fail++;
       termLine('failed', '[-]', result.subdomain, 'unresolvable');
@@ -360,7 +328,6 @@ form.addEventListener('submit', async (e) => {
 
     updateStats();
 
-    // Only add live records to table (or all if verbose)
     if (result.type !== 'none') {
       resultsSection.classList.remove('hidden');
       addTableRow(result);
@@ -369,12 +336,11 @@ form.addEventListener('submit', async (e) => {
 
   evtSource.addEventListener('done', (e) => {
     const meta = JSON.parse(e.data);
-    termLine('done', '[✓]', `Done. ${meta.live} live / ${meta.unresolvable} failed / ${meta.total} total`);
-    termLine('info', '[→]', `Report: output/${currentDomain}_results.json`);
+    termLine('done', '[✓]', `Done — ${meta.live} live / ${meta.unresolvable} failed / ${meta.total} total`);
 
     setScanningState(false);
     hideProgress();
-    exportWrap.classList.remove('hidden');
+    if (allResults.length > 0) exportWrap.classList.remove('hidden');
 
     evtSource.close();
     evtSource = null;
@@ -385,11 +351,11 @@ form.addEventListener('submit', async (e) => {
       const { msg } = JSON.parse(e.data);
       termLine('err', '[!]', msg);
     } catch {
-      // SSE connection error
       if (evtSource?.readyState === EventSource.CLOSED) {
-        termLine('err', '[!]', 'Connection to server lost.');
+        termLine('err', '[!]', 'Connection lost — scan may have timed out on the server.');
         setScanningState(false);
         hideProgress();
+        if (allResults.length > 0) exportWrap.classList.remove('hidden');
       }
     }
   });
