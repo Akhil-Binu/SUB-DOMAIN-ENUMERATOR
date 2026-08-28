@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { resolveSubdomains } from './resolver.js';
 import { fetchCrtSh } from './crtsh.js';
 import { printBanner, printResult, printSummary, saveReport } from './reporter.js';
+import { isValidDomain } from './validate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,6 +59,10 @@ async function main() {
   printBanner(opts.domain);
 
   const domain = opts.domain.toLowerCase().trim();
+  if (!isValidDomain(domain)) {
+    console.error(`\n[!] Invalid domain: "${opts.domain}"`);
+    process.exit(1);
+  }
   /** @type {Set<string>} merged, deduplicated candidate list */
   const candidates = new Set();
 

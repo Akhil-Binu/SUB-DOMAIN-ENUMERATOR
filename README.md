@@ -16,6 +16,7 @@
   - Report downloading directly from the browser.
 - **Serverless Ready**: Out-of-the-box support for **Vercel** serverless functions (`/api/scan` and `/api/results/:domain`), featuring optimized path resolution and graceful fallback to a high-prevalence 2,000-word list.
 - **Graceful Termination**: Handles `SIGINT` (Ctrl+C) by saving partial results before exiting.
+- **Hardened Input Handling**: Every domain reaching the CLI or the HTTP/serverless API is validated as a well-formed hostname before it touches DNS or the filesystem, closing off path-traversal via crafted domain values.
 
 ---
 
@@ -37,7 +38,8 @@ SUB-DOMAIN-ENUMERATOR/
 │   ├── index.js              # CLI entry point (commander)
 │   ├── resolver.js           # DNS lookup with p-limit concurrency
 │   ├── crtsh.js              # crt.sh query client with retries
-│   └── reporter.js           # Terminal logger and persistence helper
+│   ├── reporter.js           # Terminal logger and persistence helper
+│   └── validate.js           # Domain/input validation for CLI & API boundaries
 ├── wordlists/
 │   ├── subdomains.txt        # Comprehensive list (369,790 subdomains)
 │   └── top2000.txt           # High-prevalence list (2,000 subdomains)
@@ -134,6 +136,12 @@ subenum -d example.com --verbose
 
 - **`wordlists/subdomains.txt`**: A massive list containing **369,790 subdomains** for comprehensive local testing. *This file is ignored by Git to keep repo sizes optimal.*
 - **`wordlists/top2000.txt`**: A compact, high-prevalence wordlist containing exactly **2,000 subdomains** sourced from SecLists' top 1 million subdomains database. It is shipped in Git and automatically utilized by the Vercel serverless environment to guarantee fast scan times and remain within serverless timeout constraints.
+
+---
+
+## 🔒 Input Validation
+
+All entry points — the CLI's `-d/--domain` flag, the GUI form, and the `/api/scan` and `/api/results/:domain` HTTP endpoints — validate `domain` against a strict hostname pattern (`src/validate.js`) before it is used in a DNS lookup or interpolated into a report filename (`{domain}_results.json`). Requests with a malformed domain (path separators, `..` segments, whitespace, etc.) are rejected with a `400` instead of reaching the filesystem. Thread/timeout parameters on the HTTP API are likewise clamped to safe bounds, and the local GUI server's optional custom-wordlist selection is confined to the `wordlists/` directory regardless of what path is supplied.
 
 ---
 

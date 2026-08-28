@@ -6,6 +6,7 @@
 
 import { readFile } from 'fs/promises';
 import path from 'path';
+import { isValidDomain } from '../../src/validate.js';
 
 const TMP_OUTPUT = '/tmp/subenum-output';
 
@@ -16,8 +17,8 @@ const TMP_OUTPUT = '/tmp/subenum-output';
 export default async function handler(req, res) {
   const domain = req.query?.domain ?? req.url?.split('/').pop();
 
-  if (!domain) {
-    res.status(400).json({ error: 'domain is required' });
+  if (!domain || !isValidDomain(domain)) {
+    res.status(400).json({ error: 'A valid domain is required' });
     return;
   }
 

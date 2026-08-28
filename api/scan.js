@@ -16,6 +16,7 @@
 import { resolveSubdomains } from '../src/resolver.js';
 import { fetchCrtSh } from '../src/crtsh.js';
 import { saveReport } from '../src/reporter.js';
+import { isValidDomain, clampInt } from '../src/validate.js';
 import path from 'path';
 import { mkdir } from 'fs/promises';
 
@@ -51,14 +52,20 @@ export default async function handler(req, res) {
   // ── Parse query params ──────────────────────────────────────────────────────
   const url      = new URL(req.url, `https://${req.headers.host}`);
   const domain   = url.searchParams.get('domain')?.trim().toLowerCase();
-  const threads  = parseInt(url.searchParams.get('threads')  ?? '50',   10);
-  const timeout  = parseInt(url.searchParams.get('timeout')  ?? '2000', 10);
+  const threads  = clampInt(url.searchParams.get('threads'), 1, 100, 50);
+  const timeout  = clampInt(url.searchParams.get('timeout'), 500, 10000, 2000);
   const skipCrt  = url.searchParams.get('skipCrt')  === 'true';
   const verbose  = url.searchParams.get('verbose')  === 'true';
 
   if (!domain) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'domain query parameter is required' }));
+    return;
+  }
+
+  if (!isValidDomain(domain)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid domain name' }));
     return;
   }
 
@@ -107,7 +114,7 @@ export default async function handler(req, res) {
     const bruteResults = await resolveSubdomains({
       domain,
       wordlistPath,
-      concurrency: Math.min(threads, 100), // cap at 100 for serverless safety
+      concurrency: threads, // pre-clamped to [1, 100] above
       timeoutMs:   timeout,
       verbose,
       source: 'bruteforce',
@@ -130,7 +137,7 @@ export default async function handler(req, res) {
       await resolveSubdomains({
         domain,
         candidates: crtOnly,
-        concurrency: Math.min(threads, 100),
+        concurrency: threads,
         timeoutMs:   timeout,
         verbose,
         source: 'crt.sh',

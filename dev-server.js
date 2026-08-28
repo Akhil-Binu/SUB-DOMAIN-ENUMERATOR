@@ -14,10 +14,24 @@ import { fileURLToPath } from 'url';
 import { resolveSubdomains } from './src/resolver.js';
 import { fetchCrtSh } from './src/crtsh.js';
 import { saveReport } from './src/reporter.js';
+import { isValidDomain, clampInt } from './src/validate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const WORDLISTS_DIR = path.join(__dirname, 'wordlists');
 const PORT = 3000;
+
+/**
+ * Resolve a user-supplied wordlist name to a path confined to WORDLISTS_DIR.
+ * `path.basename` strips any directory components (including `../`), so the
+ * result can never escape the wordlists folder regardless of input.
+ * @param {string|null|undefined} name
+ * @returns {string}
+ */
+function resolveWordlistPath(name) {
+  if (!name) return path.join(WORDLISTS_DIR, 'subdomains.txt');
+  return path.join(WORDLISTS_DIR, path.basename(name));
+}
 
 // On Vercel /var/task is read-only — write to /tmp instead
 const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
@@ -132,7 +146,7 @@ async function runScan(scanId, opts) {
     }
 
     // ── Brute-force ──────────────────────────────────────────────────────────
-    const wordlistPath = path.resolve(wordlist || path.join(__dirname, 'wordlists', 'subdomains.txt'));
+    const wordlistPath = resolveWordlistPath(wordlist);
     broadcast(scanId, 'status', { msg: 'Starting DNS brute-force…' });
 
     const bruteResults = await resolveSubdomains({
@@ -188,6 +202,7 @@ async function runScan(scanId, opts) {
 
     broadcast(scanId, 'done', scan.meta);
   } catch (err) {
+    scan.error = err.message;
     broadcast(scanId, 'error', { msg: err.message });
   } finally {
     scan.done = true;
@@ -220,14 +235,19 @@ const server = http.createServer(async (req, res) => {
   // ── GET /api/scan — SSE stream (Vercel-compatible stateless endpoint) ────────
   if (req.method === 'GET' && pathname === '/api/scan') {
     const domain  = urlObj.searchParams.get('domain')?.trim().toLowerCase();
-    const threads = parseInt(urlObj.searchParams.get('threads') ?? '50',   10);
-    const timeout = parseInt(urlObj.searchParams.get('timeout') ?? '2000', 10);
+    const threads = clampInt(urlObj.searchParams.get('threads'), 1, 100, 50);
+    const timeout = clampInt(urlObj.searchParams.get('timeout'), 500, 10000, 2000);
     const skipCrt = urlObj.searchParams.get('skipCrt') === 'true';
     const verbose = urlObj.searchParams.get('verbose') === 'true';
 
     if (!domain) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'domain query parameter is required' }));
+    }
+
+    if (!isValidDomain(domain)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Invalid domain name' }));
     }
 
     res.writeHead(200, {
@@ -303,15 +323,21 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error: 'domain is required' }));
       }
 
+      const domain = String(body.domain).trim().toLowerCase();
+      if (!isValidDomain(domain)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Invalid domain name' }));
+      }
+
       const scanId = genId();
-      scans.set(scanId, { clients: new Set(), results: [], done: false, meta: null });
+      scans.set(scanId, { clients: new Set(), results: [], done: false, meta: null, error: null });
 
       // Fire-and-forget
       runScan(scanId, {
-        domain: body.domain.trim().toLowerCase(),
+        domain,
         wordlist: body.wordlist || null,
-        threads: parseInt(body.threads ?? 50, 10),
-        timeout: parseInt(body.timeout ?? 2000, 10),
+        threads: clampInt(body.threads, 1, 100, 50),
+        timeout: clampInt(body.timeout, 500, 10000, 2000),
         skipCrt: Boolean(body.skipCrt),
         verbose: Boolean(body.verbose),
       });
@@ -346,9 +372,12 @@ const server = http.createServer(async (req, res) => {
     res.write(': connected\n\n');
 
     if (scan.done) {
-      // Scan already finished — replay results and close
+      // Scan already finished — replay results (and any error) and close
       for (const r of scan.results) {
         res.write(`event: result\ndata: ${JSON.stringify(r)}\n\n`);
+      }
+      if (scan.error) {
+        res.write(`event: error\ndata: ${JSON.stringify({ msg: scan.error })}\n\n`);
       }
       res.write(`event: done\ndata: ${JSON.stringify(scan.meta)}\n\n`);
       return res.end();
@@ -362,6 +391,10 @@ const server = http.createServer(async (req, res) => {
   // ── GET /api/results/:domain — fetch saved JSON ──────────────────────────
   if (req.method === 'GET' && pathname.startsWith('/api/results/')) {
     const domain = pathname.split('/')[3];
+    if (!isValidDomain(domain)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Invalid domain name' }));
+    }
     try {
       const file = path.join(OUTPUT_DIR, `${domain}_results.json`);
       const content = await readFile(file, 'utf8');
